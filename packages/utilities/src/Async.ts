@@ -14,38 +14,30 @@ declare function setInterval(cb: Function, delay: number): number;
  */
 export class Async {
   private static _batchedAnimationFrameId = 0;
-  private static _batchedFrameCallbacks: Array<() => void> = [];
+  private static _instancesWithPendingBatchedFrameCallbacks: Async[] | null = null;
 
   private _timeoutIds: { [id: number]: boolean } | null = null;
   private _immediateIds: { [id: number]: boolean } | null = null;
   private _intervalIds: { [id: number]: boolean } | null = null;
   private _animationFrameIds: { [id: number]: boolean } | null = null;
-  private _batchedAnimationFrameUnsubscribes: Array<() => void> | null = null;
+  private _batchedFrameCallbacks: Array<() => void> | null = null;
   private _isDisposed: boolean;
   private _parent: object | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _onErrorHandler: ((e: any) => void) | undefined;
   private _noop: () => void;
 
-  private static _flushBatchedAnimationFrames() {
-    // rAF has run, so clear the stored frame ID. This will prevent unnecessary calls to cancelAnimationFrame if someone
-    // calls unsubscribe after the relevant callback has run
+  private static _flushInstancesWithPendingBatchedFrameCallbacks() {
+    if (!Async._instancesWithPendingBatchedFrameCallbacks) {
+      return;
+    }
+
+    let currentInstanceList = Async._instancesWithPendingBatchedFrameCallbacks;
+    Async._instancesWithPendingBatchedFrameCallbacks = null;
     Async._batchedAnimationFrameId = 0;
 
-    // An animationFrameCallback could itself call `requestBatchedRequestAnimationFrame` which would add a new callback
-    // to batchedFrameCallbacks. However, those callbacks should be called in the next rAF, not this one. This flush
-    // should only flush the currently scheduled callbacks. Any new ones added once we begin flushing should be called
-    // in the next rAF.
-    //
-    // To prevent newly scheduled callbacks from being flushed in this run, we store the current array of callbacks
-    // locally and create a new array to hold any additional callbacks scheduled while we flush.
-    //
-    // Resetting the _batchedFrameCallbacks is also important because it'll prevent calling unsubscribe
-    let currentCallbacks = Async._batchedFrameCallbacks;
-    Async._batchedFrameCallbacks = [];
-
-    for (let callback of currentCallbacks) {
-      callback();
+    for (let asyncInst of currentInstanceList) {
+      asyncInst._flushFrameCallbacks();
     }
   }
 
@@ -112,14 +104,9 @@ export class Async {
     }
 
     // Clear batched animation frame callbacks
-    if (this._batchedAnimationFrameUnsubscribes) {
-      let unsubscribe = this._batchedAnimationFrameUnsubscribes.pop();
-      while (unsubscribe) {
-        unsubscribe();
-        unsubscribe = this._batchedAnimationFrameUnsubscribes.pop();
-      }
-
-      this._batchedAnimationFrameUnsubscribes = null;
+    if (this._batchedFrameCallbacks) {
+      this._batchedFrameCallbacks = null;
+      this._unsubscribeBatchedFrameCallback();
     }
   }
 
@@ -515,66 +502,97 @@ export class Async {
       return this._noop;
     }
 
-    let unsubscribe: () => void;
     let animationFrameCallback = () => {
       try {
-        // We are executing! Let's clean up our unsubscribe function list
-        if (this._batchedAnimationFrameUnsubscribes) {
-          let unsubscribeIndex = this._batchedAnimationFrameUnsubscribes.indexOf(unsubscribe);
-          this._batchedAnimationFrameUnsubscribes.splice(unsubscribeIndex, 1);
-        }
-
         callback.apply(this._parent);
       } catch (e) {
         this._logError(e);
       }
     };
 
-    Async._batchedFrameCallbacks.push(animationFrameCallback);
-    if (Async._batchedFrameCallbacks.length === 1) {
-      // This is the first callback! Let's register the actual rAF.
-      const win = getWindow(targetElement)!;
-      Async._batchedAnimationFrameId = win.requestAnimationFrame
-        ? win.requestAnimationFrame(Async._flushBatchedAnimationFrames)
-        : win.setTimeout(Async._flushBatchedAnimationFrames, 0);
-    }
+    if (!this._batchedFrameCallbacks) {
+      this._batchedFrameCallbacks = [];
 
-    unsubscribe = () => {
-      const index = Async._batchedFrameCallbacks.indexOf(animationFrameCallback);
-      if (index > -1) {
-        Async._batchedFrameCallbacks.splice(index, 1);
-      }
+      if (!Async._instancesWithPendingBatchedFrameCallbacks) {
+        Async._instancesWithPendingBatchedFrameCallbacks = [];
 
-      if (this._batchedAnimationFrameUnsubscribes) {
-        const unsubscribeIndex = this._batchedAnimationFrameUnsubscribes.indexOf(unsubscribe);
-        if (unsubscribeIndex > -1) {
-          this._batchedAnimationFrameUnsubscribes.splice(unsubscribeIndex, 1);
-        }
-      }
-
-      if (Async._batchedFrameCallbacks.length === 0 && Async._batchedAnimationFrameId > 0) {
-        // We've canceled all animationFrame callbacks, so let's clean up the real rAF.
+        // This is the first instance with a frame callback! Let's register the actual rAF.
         const win = getWindow(targetElement)!;
-        if (win.cancelAnimationFrame) {
-          win.cancelAnimationFrame(Async._batchedAnimationFrameId);
-        } else {
-          win.clearTimeout(Async._batchedAnimationFrameId);
-        }
+        Async._batchedAnimationFrameId = win.requestAnimationFrame
+          ? win.requestAnimationFrame(Async._flushInstancesWithPendingBatchedFrameCallbacks)
+          : win.setTimeout(Async._flushInstancesWithPendingBatchedFrameCallbacks, 0);
       }
-    };
 
-    if (this._batchedAnimationFrameUnsubscribes === null) {
-      this._batchedAnimationFrameUnsubscribes = [];
+      Async._instancesWithPendingBatchedFrameCallbacks.push(this);
     }
-    this._batchedAnimationFrameUnsubscribes.push(unsubscribe);
 
-    return unsubscribe;
+    this._batchedFrameCallbacks.push(animationFrameCallback);
+    return () => this._unsubscribeBatchedFrameCallback(animationFrameCallback, targetElement);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected _logError(e: any): void {
     if (this._onErrorHandler) {
       this._onErrorHandler(e);
+    }
+  }
+
+  private _unsubscribeBatchedFrameCallback(animationFrameCallback?: () => void, targetElement?: Element | null): void {
+    // 1. Remove the callback from our instance's callback list
+    if (this._batchedFrameCallbacks && animationFrameCallback) {
+      const callbackIndex = this._batchedFrameCallbacks.indexOf(animationFrameCallback);
+      if (callbackIndex > -1) {
+        this._batchedFrameCallbacks.splice(callbackIndex, 1);
+      }
+    }
+
+    // 2. If our instance list is now empty, then remove our instance from the list of instances with pending callbacks
+    if (this._batchedFrameCallbacks === null || this._batchedFrameCallbacks.length === 0) {
+      this._batchedFrameCallbacks = null;
+
+      if (Async._instancesWithPendingBatchedFrameCallbacks) {
+        const asyncIndex = Async._instancesWithPendingBatchedFrameCallbacks.indexOf(this);
+        if (asyncIndex > -1) {
+          Async._instancesWithPendingBatchedFrameCallbacks.splice(asyncIndex, 1);
+        }
+      }
+    }
+
+    // 3. If the list of instances with pending frame callbacks is empty, then clean up the real rAF.
+    if (
+      Async._instancesWithPendingBatchedFrameCallbacks !== null &&
+      Async._instancesWithPendingBatchedFrameCallbacks.length === 0
+    ) {
+      Async._batchedAnimationFrameId = 0;
+      Async._instancesWithPendingBatchedFrameCallbacks = null;
+
+      const win = getWindow(targetElement)!;
+      if (win.cancelAnimationFrame) {
+        win.cancelAnimationFrame(Async._batchedAnimationFrameId);
+      } else {
+        win.clearTimeout(Async._batchedAnimationFrameId);
+      }
+    }
+  }
+
+  private _flushFrameCallbacks(): void {
+    if (!this._batchedFrameCallbacks) {
+      return;
+    }
+
+    // An animationFrameCallback could itself call `requestBatchedRequestAnimationFrame` which would add a new callback
+    // to batchedFrameCallbacks. However, those callbacks should be called in the next rAF, not this one. This flush
+    // should only flush the currently scheduled callbacks. Any new callbacks added once we begin flushing should be
+    // called in the next rAF.
+    //
+    // To prevent newly scheduled callbacks from being flushed in this run, we store the current array of callbacks
+    // locally and null out batchedFrameCallbacks to force scheduling a new rAF and creation of a new array to hold any
+    // additional callbacks scheduled while we flush.
+    let currentCallbacks = this._batchedFrameCallbacks;
+    this._batchedFrameCallbacks = null;
+
+    for (let callback of currentCallbacks) {
+      callback();
     }
   }
 }
