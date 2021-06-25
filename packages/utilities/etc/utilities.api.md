@@ -73,6 +73,8 @@ export class Async {
     protected _logError(e: any): void;
     // (undocumented)
     requestAnimationFrame(callback: () => void, targetElement?: Element | null): number;
+    // (undocumented)
+    requestBatchedAnimationFrame(callback: () => void, targetElement?: Element | null): () => void;
     setImmediate(callback: () => void, targetElement?: Element | null): number;
     setInterval(callback: () => void, duration: number): number;
     setTimeout(callback: () => void, duration: number): number;
