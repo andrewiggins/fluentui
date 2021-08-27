@@ -1,3 +1,4 @@
+import { unstable_batchedUpdates } from 'react-dom';
 import { getWindow } from './dom/getWindow';
 
 declare function setTimeout(cb: Function, delay: number): number;
@@ -36,9 +37,11 @@ export class Async {
     Async._instancesWithPendingBatchedFrameCallbacks = null;
     Async._batchedAnimationFrameId = 0;
 
-    for (let asyncInst of currentInstanceList) {
-      asyncInst._flushFrameCallbacks();
-    }
+    unstable_batchedUpdates(() => {
+      for (let asyncInst of currentInstanceList) {
+        asyncInst._flushFrameCallbacks();
+      }
+    });
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
