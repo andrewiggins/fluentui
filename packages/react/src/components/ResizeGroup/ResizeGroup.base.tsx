@@ -399,7 +399,7 @@ function useResizingBehavior(props: IResizeGroupProps, rootRef: React.RefObject<
   });
 
   React.useEffect((): void => {
-    async.requestAnimationFrame(() => {
+    async.requestBatchedAnimationFrame(() => {
       let containerDimension = undefined;
       if (stateRef.current.measureContainer && rootRef.current) {
         const boundingRect = rootRef.current.getBoundingClientRect();
